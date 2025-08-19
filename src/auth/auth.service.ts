@@ -1,7 +1,8 @@
-import { Injectable, InternalServerErrorException, Logger } from '@nestjs/common';
+import { Injectable, InternalServerErrorException, Logger, NotFoundException } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
 import { RegisterUserDto } from './dto/register-user.dto';
+import { LoginDto } from './dto/login.dto';
 import { User, UserDocument } from '../common/schemas/user.schema';
 import { Auth0Service } from '../common/auth0/auth0.service';
 
@@ -51,5 +52,49 @@ export class AuthService {
             this.logger.error('Mongo user creation failed, rolled back Auth0 user', error);
             throw new InternalServerErrorException('Mongo user creation failed');
         }
+    }
+
+    async login(payload: LoginDto) {
+        const { password, ...safe } = payload;
+        const masked = password ? '*'.repeat(8) : undefined;
+        this.logger.log(`Login payload: ${JSON.stringify({ ...safe, password: masked })}`);
+
+        // 1) Verificar existencia de usuario en MongoDB
+        const user = await this.userModel.findOne({ email: payload.username }).exec();
+        if (!user) {
+            throw new NotFoundException('User not found');
+        }
+
+        // 2) Autenticar contra Auth0 (Authentication API)
+        const tokens = await this.auth0Service.loginWithPassword(payload.username, password);
+
+        // 3) (Opcional) Obtener userinfo si hay access_token
+        let auth0Profile: Record<string, unknown> | undefined;
+        if (tokens?.access_token) {
+            try {
+                auth0Profile = await this.auth0Service.getUserInfo(tokens.access_token);
+            } catch (error) {
+                // No bloquear login si falla userinfo; ya tenemos tokens
+                const err = error as Error;
+                this.logger.warn(`Failed to fetch Auth0 userinfo after login: ${err.message}`);
+            }
+        }
+
+        return {
+            isSuccess: true,
+            message: 'Login successful',
+            data: {
+                user: {
+                    _id: user._id,
+                    email: user.email,
+                    name: user.name,
+                    companyName: user.companyName,
+                    lastName: user.lastName,
+                    phoneNumber: user.phoneNumber,
+                },
+                tokens,
+                auth0Profile,
+            },
+        };
     }
 }
